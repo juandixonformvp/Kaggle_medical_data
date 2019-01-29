@@ -1,0 +1,258 @@
+---
+title: "HW3 - Kaggle Competition"
+output: html_notebook
+---
+
+## Exploratory Points begin on Line 195.
+
+```{r}
+library(randomForest)
+library(mlbench)
+library(caret)
+library(e1071)
+library(MASS)
+library(ggparallel)
+library(rpart)
+library(devtools)
+library(ggbiplot)
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+library(factoextra)
+library(MatchIt)
+library(splitstackshape)
+library(gbm)
+
+setwd('C:/Users/rchang/Documents/Robert/Personal/CSCI E-82/Chang_HW_3')
+df <- read.csv('train_data.csv')
+td <- read.csv('test_data.csv')
+```
+## Preliminary Data Exploration
+* I first look at relationships between the categorical variables, similar to the histrograms shown in Section. 
+* Parallel Coordinates plots help understand the interaction between categorical variables and the relationships between Subject/Phase/State.
+* H & M seem to be missing phases, State E also rarely happens. 
+* Subject/Phase interaction is important for the model, as outcome is more likely in later phases.
+
+```{r}
+table(df$output)
+prop.table(table(df$subject,df$output), 1)
+prop.table(table(df$state,df$output), 1)
+prop.table(table(df$phase,df$output), 1)
+prop.table(table(df$subject,df$state), 1)
+prop.table(table(df$state,df$phase), 1)
+prop.table(table(df$subject,df$phase), 1)
+
+prop.table(table(df$subject))
+prop.table(table(td$subject)) #Subject J is ~36% of test data but not in train data
+prop.table(table(df$state))
+prop.table(table(td$state))
+prop.table(table(df$phase))
+prop.table(table(td$phase))
+prop.table(table(td$subject,td$state), 1)
+prop.table(table(td$state,td$phase), 1)
+prop.table(table(td$subject,td$phase), 1)
+
+ggparallel(list('subject', 'phase', 'state', 'output'), df) # parallel coordinates
+
+```
+## Observations and Remedies
+* *Subject J* and *Subject E* are in the test set but not the training set. 
+* I tried one-hot encoding for the Subject variable, but was not getting good results
+* I decide to use **Propensity Score Matching** to synthetically add data similar to Subject J and Subject E to the training set.
+
+```{r}
+td.match <- td
+td.match$output <- 1
+mydata <- rbind(df, td.match[td.match$subject == 'J',])
+mydata$Group <- as.logical(mydata$subject == 'J')
+xnam <- paste("x", 1:222, sep="")
+ynam <- paste("y", 1:222, sep="")
+znam <- paste("z", 1:222, sep="")
+fmla <- as.formula(paste("Group ~ ", paste(xnam, collapse= "+"), "+",  sep = "", paste(ynam, collapse= "+"), "+", paste(znam, collapse= "+")))
+match.it <- matchit(fmla, data = mydata, method="nearest", ratio=1)
+a <- summary(match.it)
+#PSM says these are the observations in the training set most similar to Subject J
+df.J <- match.data(match.it)[1:ncol(mydata)]
+prop.table(table(df.J$subject)) # M & K seem closest to J
+df.J <- df.J[,-671]
+df.J = df.J[df.J$subject != 'J',]
+df.J$subject = 'J'
+
+td.match <- td
+td.match$output <- 1
+mydata <- rbind(df, td.match[td.match$subject == 'E',])
+mydata$Group <- as.logical(mydata$subject == 'E')
+xnam <- paste("x", 1:222, sep="")
+ynam <- paste("y", 1:222, sep="")
+znam <- paste("z", 1:222, sep="")
+fmla <- as.formula(paste("Group ~ ", paste(xnam, collapse= "+"), "+",  sep = "", paste(ynam, collapse= "+"), "+", paste(znam, collapse= "+")))
+match.it <- matchit(fmla, data = mydata, method="nearest", ratio=1)
+a <- summary(match.it)
+#PSM says these are the observations in the training set most similar to Subject J
+df.E <- match.data(match.it)[1:ncol(mydata)]
+prop.table(table(df.E$subject)) # M & K seem closest to J
+df.E <- df.E[,-671]
+df.E = df.E[df.E$subject != 'E',]
+df.E$subject = 'E'
+
+df <- rbind(df, df.J, df.E)
+y_binary = df$output
+df$output <- factor(ifelse(df$output==0, "Zero", "One"))
+dfnum <- df[,1:666]
+dfcat <- df[,667:670]
+tdnum <- td[,1:666]
+tdcat <- td[,667:669]
+```
+## Feature Engineering
+* I add Subject/Phase dummies, similar to what was discussed in Section.
+```{r}
+dfcat$SubA_Phase1 <- 0
+dfcat$SubI_Phase1 <- 0
+dfcat$SubM_Phase1 <- 0
+dfcat$SubA_Phase2 <- 0
+dfcat$SubF_Phase2 <- 0
+dfcat$SubI_Phase3 <- 0
+dfcat$SubL_Phase3 <- 0
+dfcat$SubL_Phase4 <- 0
+
+dfcat[dfcat$subject == "A" & dfcat$phase == 1, "SubA_Phase1"] <- 1
+dfcat[dfcat$subject == "I" & dfcat$phase == 1, "SubI_Phase1"] <- 1
+dfcat[dfcat$subject == "M" & dfcat$phase == 1, "SubM_Phase1"] <- 1
+dfcat[dfcat$subject == "A" & dfcat$phase == 2, "SubA_Phase2"] <- 1
+dfcat[dfcat$subject == "F" & dfcat$phase == 2, "SubF_Phase2"] <- 1
+dfcat[dfcat$subject == "I" & dfcat$phase == 3, "SubI_Phase3"] <- 1
+dfcat[dfcat$subject == "L" & dfcat$phase == 3, "SubL_Phase3"] <- 1
+dfcat[dfcat$subject == "L" & dfcat$phase == 4, "SubL_Phase4"] <- 1
+
+tdcat$SubA_Phase1 <- 0
+tdcat$SubI_Phase1 <- 0
+tdcat$SubM_Phase1 <- 0
+tdcat$SubA_Phase2 <- 0
+tdcat$SubF_Phase2 <- 0
+tdcat$SubI_Phase3 <- 0
+tdcat$SubL_Phase3 <- 0
+tdcat$SubL_Phase4 <- 0
+
+tdcat[tdcat$subject == "A" & tdcat$phase == 1, "SubA_Phase1"] <- 1
+tdcat[tdcat$subject == "I" & tdcat$phase == 1, "SubI_Phase1"] <- 1
+tdcat[tdcat$subject == "M" & tdcat$phase == 1, "SubM_Phase1"] <- 1
+tdcat[tdcat$subject == "A" & tdcat$phase == 2, "SubA_Phase2"] <- 1
+tdcat[tdcat$subject == "F" & tdcat$phase == 2, "SubF_Phase2"] <- 1
+tdcat[tdcat$subject == "I" & tdcat$phase == 3, "SubI_Phase3"] <- 1
+tdcat[tdcat$subject == "L" & tdcat$phase == 3, "SubL_Phase3"] <- 1
+tdcat[tdcat$subject == "L" & tdcat$phase == 4, "SubL_Phase4"] <- 1
+```
+## Dimensionality Reduction
+* I consolidate the 222 x,y,z coordinates by using 222 unique PCAs.
+* I take first principal component from each of the 222 x,y,z groupings.
+* By swapping the principal component for the x,y,z grouping I reduce 666 variables to 222. 
+* I remove variables with near-zero variance, as they make classification tree algorithms unstable.
+```{r}
+dfcol1 <- as.data.frame(integer(nrow(df)))
+tdcol1 <- as.data.frame(integer(nrow(td)))
+
+for (i in 1:222){
+  tempx <- paste("x", i, sep = "")
+  tempy <- paste("y", i, sep = "")
+  tempz <- paste("z", i, sep = "")
+  
+  dfPCA <- as.data.frame(cbind(df[,tempx],df[,tempy],df[,tempz]))
+  tdPCA <- as.data.frame(cbind(td[,tempx],td[,tempy],td[,tempz]))
+  temp.pca <- prcomp(dfPCA)
+  dfPCApred <- as.data.frame(predict(temp.pca, newdata=dfPCA))
+  tdPCApred <- as.data.frame(predict(temp.pca, newdata=tdPCA))
+  
+  pcacolname <- paste("pca", i, sep = "")
+  
+  names(dfPCApred)[names(dfPCApred)=="PC1"] <- pcacolname
+  names(tdPCApred)[names(tdPCApred)=="PC1"] <- pcacolname
+  
+  dfcol1 <- cbind(dfcol1,dfPCApred)
+  dfcol1$PC2 <- NULL
+  dfcol1$PC3 <- NULL
+  
+  tdcol1 <- cbind(tdcol1,tdPCApred)
+  tdcol1$PC2 <- NULL
+  tdcol1$PC3 <- NULL
+}
+
+dfcol1 <- dfcol1[,-1]
+tdcol1 <- tdcol1[,-1]
+
+#remove near zero-variance predictors
+remove_cols <- nearZeroVar(dfcol1, names = TRUE, freqCut = 2, uniqueCut = 20)
+all_cols <- names(dfcol1)
+dfcol1_small <- dfcol1[ , setdiff(all_cols, remove_cols)]
+
+df.all <- cbind(dfcol1_small, dfcat)
+td.all <- cbind(tdcol1, tdcat)
+```
+## Classification Algorithms
+* I test three diferent classification algorithms with the *caret* package in R. 
+    + Gradient Boosted Trees
+    + Random Forest
+    + Extreme Gradient Boosting
+* Caret uses cross validation for tuning, and allows easy comparison of multiple classification approaches.
+
+
+## Exploratory Points - I apply the three different classification algorithms to the Titanic Dataset. XGB boost seems like the algorithm with the highest accuracy, with Random Forests also showing strong accuracy.
+
+```{r}
+library("titanic")
+df.titanic = titanic_train
+
+categorical <- c('PassengerId', 'Pclass', 'Parch', 'Sex', 'Embarked', 'SibSp')
+for(j in categorical) {
+  df.titanic[[j]] <- as.factor(df.titanic[[j]])
+}
+
+keeps <- c('Survived', 'Pclass', 'Parch', 'Sex', 'Embarked', 'SibSp','Age','Fare')
+df.titanic = df.titanic[keeps]
+
+names(df.titanic )[names(df.titanic ) == 'Survived'] <- 'output'
+
+df.titanic <- df.titanic[complete.cases(df.titanic), ]
+df.titanic$output=ifelse(df.titanic$output==0,"No","Yes")
+
+```
+
+```{r}
+control <- trainControl(method="repeatedcv", number=2, repeats=1, classProbs = TRUE)
+set.seed(7)
+modelGBM <- train(output ~ ., data = df.titanic, method='gbm', trControl=control, metric = "ROC", preProc = c("center", "scale"))
+set.seed(7)
+mtry <- sqrt(ncol(df.all))
+tunegrid <- expand.grid(.mtry=mtry)
+modelRF <- train(output ~ ., data = df.titanic, method="rf", metric="Accuracy", tuneGrid=tunegrid, trControl=control)
+set.seed(7)
+modelXGB <- train(output ~ ., data = df.titanic, method='xgbTree', trControl=control, metric = "Accuracy", preProc = c("center", "scale"))
+```
+## Analysis of Results
+* I compare box plots of the Accuracy and Kappa metrics
+* Extreme Gradient Boosting has the highest Accuracy Ratio and Kappa. 
+* Variable importance shows that Gradient Boosting places more importance on categorical variables. 
+* Random Forest places more importance on continuous variables.
+```{r}
+results <- resamples(list(GBM=modelGBM, RF=modelRF, XGB=modelXGB))
+summary(results)
+bwplot(results)
+dotplot(results)
+
+```
+
+## Here are the Variable Importance plots for the Titanic dataset. The important variables are intuitive and consistent with expectation.
+
+```{r}
+varImp(modelGBM)
+varImp(modelRF)
+varImp(modelXGB)
+```
+
+
+# Kaggle Submission
+* I use the predictions from the Extreme Gradient Boosting algorithm for my Kaggle submission.
+* Extreme Gradient Boosting had the highest Kappa on average, but has a very wide range.
+```{r}
+pred <- predict(modelXGB, newdata = td.all)
+table(pred)
+```
